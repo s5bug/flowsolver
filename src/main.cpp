@@ -83,12 +83,10 @@ std::vector<std::vector<z3::expr>> board_const(z3::context& c, std::size_t w, st
     return result;
 }
 
-std::vector<std::vector<int>> solve(FlowState state) {
-    z3::context c;
-    
-    std::vector<std::vector<z3::expr>> board = board_const(c, state.width, state.height, "board");
+std::vector<std::vector<int>> solve(std::shared_ptr<z3::context> c, FlowState state) {
+    std::vector<std::vector<z3::expr>> board = board_const(*c, state.width, state.height, "board");
 
-    z3::solver s(c);
+    z3::solver s(*c);
 
     for(std::size_t y = 0; y < state.height; y++) {
         for(std::size_t x = 0; x < state.width; x++) {
@@ -101,7 +99,7 @@ std::vector<std::vector<int>> solve(FlowState state) {
             }
 
             // Add neighbor constraint
-            z3::expr_vector neighbor_equality_constraints(c);
+            z3::expr_vector neighbor_equality_constraints(*c);
             if(y > 0) neighbor_equality_constraints.push_back(here == board[y - 1][x]);
             if(y < state.height - 1) neighbor_equality_constraints.push_back(here == board[y + 1][x]);
             if(x > 0) neighbor_equality_constraints.push_back(here == board[y][x - 1]);
@@ -144,7 +142,8 @@ int main(int argc, char* argv[]) {
 
     FlowState state = initial_flow_state;
 
-    std::vector<std::future<std::vector<std::vector<int>>>> solve_status;
+    std::future<std::vector<std::vector<int>>> solve_status;
+    std::shared_ptr<z3::context> solve_context = nullptr;
     std::vector<std::vector<int>> solution_data;
 
     bool state_changed = true;
@@ -217,24 +216,20 @@ int main(int argc, char* argv[]) {
         }
 
         if(state_changed) {
-            solve_status.erase(
-                std::remove_if(solve_status.begin(), solve_status.end(), [](std::future<std::vector<std::vector<int>>>& fut) {
-                    return (!fut.valid()) || fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-                }),
-                solve_status.end()
-            );
+            if(solve_context) solve_context->interrupt();
 
-            solve_status.push_back(std::async(std::launch::async, solve, state));
+            solve_context = std::make_shared<z3::context>();
+            solve_status = std::async(std::launch::async, solve, solve_context, state);
             
             state_changed = false;
             solution_dirty = true;
         }
 
         if(solution_dirty) {
-            if(solve_status.back().valid()) {
-                if(solve_status.back().wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            if(solve_status.valid()) {
+                if(solve_status.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
                     try {
-                        solution_data = solve_status.back().get();
+                        solution_data = solve_status.get();
                     } catch (const std::exception& e) {
                         std::cout << e.what() << std::endl;
                     }
@@ -299,6 +294,8 @@ int main(int argc, char* argv[]) {
     }
 
     CloseWindow();
+    
+    if(solve_context) solve_context->interrupt();
 
     return 0;
 }
